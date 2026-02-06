@@ -1,6 +1,5 @@
-// netlify/functions/shelly-toggle.js
-
 exports.handler = async (event) => {
+  // ---------- CORS ----------
   const cors = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
@@ -14,43 +13,79 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers: cors, body: "Use POST" };
   }
 
+  // ---------- ENV VARS ----------
   const HOST = process.env.SHELLY_HOST;          // z.B. shelly-106-eu.shelly.cloud
-  const AUTH_KEY = process.env.SHELLY_AUTH_KEY;  // aus der App
-  const ID = process.env.SHELLY_DEVICE_ID;       // Device ID aus der App
+  const AUTH_KEY = process.env.SHELLY_AUTH_KEY;  // Cloud Authorization Key
+  const DEVICE_ID = process.env.SHELLY_DEVICE_ID;
   const CHANNEL = Number(process.env.SHELLY_CHANNEL ?? "0");
 
-  if (!HOST || !AUTH_KEY || !ID) {
+  if (!HOST || !AUTH_KEY || !DEVICE_ID) {
     return {
       statusCode: 500,
       headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: false, error: "Missing env vars" }),
+      body: JSON.stringify({
+        ok: false,
+        error: "Missing env vars",
+        need: ["SHELLY_HOST", "SHELLY_AUTH_KEY", "SHELLY_DEVICE_ID"],
+      }),
     };
   }
 
   const apiBase = `https://${HOST}`;
 
-  // 1) Status holen
-  const getRes = await fetch(`${apiBase}/v2/devices/api/get?auth_key=${encodeURIComponent(AUTH_KEY)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids: [ID], select: ["status"] }),
-  });
-
-  if (!getRes.ok) {
-    const text = await getRes.text();
+  // ---------- CONNECTIVITY PROBE ----------
+  try {
+    await fetch(apiBase, { method: "GET" });
+  } catch (e) {
     return {
       statusCode: 502,
       headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: false, step: "get", status: getRes.status, body: text }),
+      body: JSON.stringify({
+        ok: false,
+        step: "probe",
+        apiBase,
+        error: String(e),
+      }),
     };
   }
 
-  const arr = await getRes.json();
-  const status = arr?.[0]?.status ?? {};
-  const switchKey = `switch:${CHANNEL}`;
+  // ---------- 1) STATUS HOLEN ----------
+  let statusData;
+  try {
+    const getRes = await fetch(
+      `${apiBase}/v2/devices/api/get?auth_key=${encodeURIComponent(AUTH_KEY)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ids: [DEVICE_ID],
+          select: ["status"],
+        }),
+      }
+    );
 
-  // Shelly Plus 1PM: status["switch:0"].output ist typisch korrekt
-  const current = status?.[switchKey]?.output;
+    if (!getRes.ok) {
+      const text = await getRes.text();
+      throw new Error(`GET failed (${getRes.status}): ${text}`);
+    }
+
+    const arr = await getRes.json();
+    statusData = arr?.[0]?.status ?? {};
+  } catch (e) {
+    return {
+      statusCode: 502,
+      headers: { ...cors, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ok: false,
+        step: "get",
+        error: String(e),
+      }),
+    };
+  }
+
+  // ---------- STATUS PARSEN (Plus 1PM) ----------
+  const switchKey = `switch:${CHANNEL}`;
+  const current = statusData?.[switchKey]?.output;
 
   if (typeof current !== "boolean") {
     return {
@@ -58,35 +93,55 @@ exports.handler = async (event) => {
       headers: { ...cors, "Content-Type": "application/json" },
       body: JSON.stringify({
         ok: false,
-        error: `Konnte status["${switchKey}"].output nicht lesen.`,
-        statusKeys: Object.keys(status),
+        error: `Cannot read status["${switchKey}"].output`,
+        statusKeys: Object.keys(statusData),
       }),
     };
   }
 
   const nextOn = !current;
 
-  // 2) Schalten
-  const setRes = await fetch(`${apiBase}/v2/devices/api/set/switch?auth_key=${encodeURIComponent(AUTH_KEY)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: ID, channel: CHANNEL, on: nextOn }),
-  });
+  // ---------- 2) SCHALTEN ----------
+  try {
+    const setRes = await fetch(
+      `${apiBase}/v2/devices/api/set/switch?auth_key=${encodeURIComponent(AUTH_KEY)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: DEVICE_ID,
+          channel: CHANNEL,
+          on: nextOn,
+        }),
+      }
+    );
 
-  if (!setRes.ok) {
-    const text = await setRes.text();
+    if (!setRes.ok) {
+      const text = await setRes.text();
+      throw new Error(`SET failed (${setRes.status}): ${text}`);
+    }
+
+    const result = await setRes.json().catch(() => ({}));
+
+    return {
+      statusCode: 200,
+      headers: { ...cors, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ok: true,
+        from: current,
+        to: nextOn,
+        result,
+      }),
+    };
+  } catch (e) {
     return {
       statusCode: 502,
       headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: false, step: "set", status: setRes.status, body: text }),
+      body: JSON.stringify({
+        ok: false,
+        step: "set",
+        error: String(e),
+      }),
     };
   }
-
-  const result = await setRes.json().catch(() => ({}));
-
-  return {
-    statusCode: 200,
-    headers: { ...cors, "Content-Type": "application/json" },
-    body: JSON.stringify({ ok: true, from: current, to: nextOn, result }),
-  };
 };
