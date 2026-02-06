@@ -3,20 +3,19 @@
 <script>
   document.getElementById("toggleBtn").addEventListener("click", async () => {
     const res = await fetch("/.netlify/functions/shelly-toggle", { method: "POST" });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    const data = await res.json().catch(() => null);
 
-    console.log("STATUS:", res.status);
-    console.log("BODY:", data);
+    console.log("STATUS:", res.status, "DATA:", data);
 
-    if (!res.ok || data.ok === false) {
-      alert("Fehler: " + (data.error || data.body || data.raw || res.statusText));
+    if (!res.ok || (data && data.ok === false)) {
+      alert("Fehler:\n" + JSON.stringify(data ?? { status: res.status }, null, 2));
       return;
     }
+
     alert(`OK: ${data.from} → ${data.to}`);
   });
 </script>
+
 
 
 
